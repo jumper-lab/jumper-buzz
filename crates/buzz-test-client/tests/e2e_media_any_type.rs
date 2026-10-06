@@ -1,7 +1,7 @@
 //! End-to-end regression for opaque arbitrary-format Blossom attachments.
 //!
 //! Requires a relay started with `BUZZ_MEDIA_ALLOW_ALL_FILE_TYPES=true`, plus
-//! Postgres, Redis, and a pre-created S3/MinIO bucket.
+//! Postgres, Redis, and a pre-created S3-compatible bucket.
 //!
 //! Run: `cargo test -p buzz-test-client --test e2e_media_any_type -- --ignored`
 
@@ -42,12 +42,7 @@ fn auth_header(event: &nostr::Event) -> String {
     )
 }
 
-async fn upload(
-    client: &Client,
-    keys: &Keys,
-    body: &[u8],
-    declared_mime: &str,
-) -> Response {
+async fn upload(client: &Client, keys: &Keys, body: &[u8], declared_mime: &str) -> Response {
     let sha256 = hex::encode(Sha256::digest(body));
     let auth = sign_upload(keys, &sha256);
     client
@@ -62,7 +57,10 @@ async fn upload(
 }
 
 fn assert_inert_download(response: &Response) {
-    assert_eq!(response.headers()["content-type"], "application/octet-stream");
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/octet-stream"
+    );
     assert_eq!(response.headers()["content-disposition"], "attachment");
     assert_eq!(response.headers()["x-content-type-options"], "nosniff");
     assert_eq!(
@@ -72,7 +70,7 @@ fn assert_inert_download(response: &Response) {
 }
 
 #[tokio::test]
-#[ignore = "requires isolated relay + Postgres + Redis + MinIO"]
+#[ignore = "requires isolated relay + Postgres + Redis + S3-compatible storage"]
 async fn arbitrary_formats_are_authenticated_opaque_downloads_with_safe_ranges() {
     let client = http_client();
     let keys = Keys::generate();
@@ -101,8 +99,16 @@ async fn arbitrary_formats_are_authenticated_opaque_downloads_with_safe_ranges()
             b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>",
         ),
         ("jsx", "text/javascript", b"export default () => null;"),
-        ("exe", "application/x-msdownload", b"MZ\x90\x00neutral fixture"),
-        ("elf", "application/x-executable", b"\x7fELF\x02\x01\x01neutral fixture"),
+        (
+            "exe",
+            "application/x-msdownload",
+            b"MZ\x90\x00neutral fixture",
+        ),
+        (
+            "elf",
+            "application/x-executable",
+            b"\x7fELF\x02\x01\x01neutral fixture",
+        ),
         (
             "macho",
             "application/x-mach-binary",
@@ -121,7 +127,11 @@ async fn arbitrary_formats_are_authenticated_opaque_downloads_with_safe_ranges()
         ),
         ("pdf", "application/pdf", b"%PDF-1.7\nneutral fixture"),
         ("audio", "audio/mpeg", b"ID3\x04\x00\x00\x00\x00\x00\x00"),
-        ("unknown", "application/x-private-format", b"\x00\x13\xff\x80arbitrary octets"),
+        (
+            "unknown",
+            "application/x-private-format",
+            b"\x00\x13\xff\x80arbitrary octets",
+        ),
         ("empty", "application/octet-stream", b""),
     ];
 
@@ -132,7 +142,10 @@ async fn arbitrary_formats_are_authenticated_opaque_downloads_with_safe_ranges()
         let url = descriptor["url"].as_str().expect("descriptor URL");
         assert_eq!(descriptor["type"], "application/octet-stream", "{name}");
         assert_eq!(descriptor["size"], bytes.len() as u64, "{name}");
-        assert!(url.contains(descriptor["sha256"].as_str().unwrap()), "{name} URL/hash");
+        assert!(
+            url.contains(descriptor["sha256"].as_str().unwrap()),
+            "{name} URL/hash"
+        );
 
         if *name == "html" {
             let other_tenant = client

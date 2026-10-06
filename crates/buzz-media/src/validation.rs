@@ -64,18 +64,12 @@ pub fn looks_like_mp4_iso_bmff(bytes: &[u8]) -> bool {
             .any(|brand| MP4_BRANDS.iter().any(|candidate| brand == candidate))
 }
 
-/// MIME types blocked from the generic file-upload path.
+/// MIME types blocked by the default strict generic-file policy.
 ///
-/// These are the formats a browser (or the desktop webview) will *execute* or
-/// *render as active content* if it ever reaches them with the wrong response
-/// headers. We serve generic files with `Content-Disposition: attachment` +
-/// `X-Content-Type-Options: nosniff` + `CSP: default-src 'none'`, which already
-/// neutralises them — this allowlist-of-denials is defence in depth, so a future
-/// header regression can't turn an uploaded blob into a stored-XSS vector.
-///
-/// HTML, JS, and SVG are the classic stored-XSS carriers. Native executables are
-/// blocked because there's no legitimate reason to host them inline in chat and
-/// they're a malware-distribution risk.
+/// The opt-in allow-all policy bypasses this list and stores every non-canonical
+/// format as opaque `application/octet-stream` bytes. Serving still forces an
+/// attachment with `nosniff` and a restrictive CSP so active content is not
+/// rendered by the relay response.
 const BLOCKED_FILE_MIME_TYPES: &[&str] = &[
     // Active web content — stored-XSS vectors.
     "text/html",
@@ -183,9 +177,10 @@ pub(crate) fn validate_file_content_with_policy(
 
         // Canonical raster images and MP4 must never bypass their established
         // metadata/EXIF and video validation pipelines.
-        if mime.as_deref().is_some_and(|mime| {
-            ALLOWED_MIME_TYPES.contains(&mime) || mime == "video/mp4"
-        }) || looks_like_mp4_iso_bmff(bytes)
+        if mime
+            .as_deref()
+            .is_some_and(|mime| ALLOWED_MIME_TYPES.contains(&mime) || mime == "video/mp4")
+            || looks_like_mp4_iso_bmff(bytes)
         {
             return Err(MediaError::DisallowedContentType(
                 mime.unwrap_or_else(|| "video/mp4".to_string()),
@@ -1606,7 +1601,10 @@ mod tests {
         let config = test_config();
         let fixtures: &[(&str, &[u8])] = &[
             ("html", b"<!doctype html><script>window.neutral=1</script>"),
-            ("svg", b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>"),
+            (
+                "svg",
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>",
+            ),
             ("bmp", b"BM\x00\x00\x00\x00\x00\x00\x00\x00"),
             ("js", b"const neutral = true;"),
             ("exe", b"MZ\x90\x00neutral fixture"),
@@ -1615,7 +1613,10 @@ mod tests {
             ("zip", b"PK\x03\x04neutral fixture"),
             ("audio", b"ID3\x04\x00\x00\x00\x00\x00\x00"),
             ("unknown", b"\x00\x13\xff\x80arbitrary octets"),
-            ("other-bmff", b"\x00\x00\x00\x18ftypPRIV\x00\x00\x00\x00heicmif1"),
+            (
+                "other-bmff",
+                b"\x00\x00\x00\x18ftypPRIV\x00\x00\x00\x00heicmif1",
+            ),
         ];
 
         for (name, bytes) in fixtures {

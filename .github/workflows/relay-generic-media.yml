@@ -1,9 +1,6 @@
 name: Relay generic media
 
 on:
-  push:
-    branches:
-      - operador/t_398f3d2f-relay-anexos-genericos
   pull_request:
     branches:
       - jumper/relay-production
@@ -146,11 +143,16 @@ jobs:
 
       - name: Build Docker image as a binary-only overlay on the exact live image
         id: overlay
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           base='ghcr.io/block/buzz@sha256:a2b59030b29242adb0783a05cbabd63f51518fdfe7b724845a68f77adab7e1f9'
           source_commit="$(git rev-parse HEAD)"
-          base_commit="$(git rev-parse HEAD^)"
+          test "$source_commit" = "$PR_HEAD_SHA"
+          base_commit="$PR_BASE_SHA"
+          git merge-base --is-ancestor "$base_commit" "$source_commit"
           image="buzz-relay-live-overlay:${source_commit}"
           context="$RUNNER_TEMP/buzz-relay-overlay-context"
           output="$RUNNER_TEMP/buzz-relay-deployable"

@@ -14,7 +14,7 @@ use crate::types::BlobDescriptor;
 use crate::upload_record::{record_upload_event, UploadAttribution, UploadEventFacts};
 use crate::validation::{
     looks_like_mp4_iso_bmff, mime_to_ext, validate_content, validate_file_content,
-    validate_video_file,
+    validate_file_content_with_policy, validate_video_file,
 };
 
 /// Shared buffered-upload pipeline for the image and generic-file paths.
@@ -231,17 +231,11 @@ pub async fn process_upload(
     .await
 }
 
-/// Process a generic non-media file upload end-to-end.
-///
-/// This is the catch-all attachment path for documents, archives, text, and
-/// data. Recognized image, video, and audio formats fail closed instead of
-/// entering exact-byte storage without their format-specific location policy.
-/// The body is fully buffered in RAM (bounded by `config.max_file_bytes` at the
-/// transport layer), validated against the deny-list + size cap, stored, and
-/// recorded in a minimal sidecar. No thumbnail, dimensions, or duration.
-///
-/// The resulting blob is served with `Content-Disposition: attachment`, so the
-/// client always downloads it rather than rendering it inline.
+/// Process a generic non-media file upload end-to-end under the strict default
+/// policy. The relay may instead call
+/// [`process_file_upload_with_policy`] with its explicit opt-in setting;
+/// accepted arbitrary bytes are normalized to `application/octet-stream` and
+/// remain download-only. Authentication and size caps apply on both paths.
 pub async fn process_file_upload(
     storage: &MediaStorage,
     config: &MediaConfig,

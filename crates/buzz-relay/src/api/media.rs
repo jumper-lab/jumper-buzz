@@ -339,10 +339,8 @@ pub async fn upload_blob(
     }
     let replay = futures_util::stream::iter(replay_chunks.into_iter().map(Ok)).chain(source);
 
-    let mut descriptor = if should_stream_as_video(
-        &sniff,
-        state.config.media_allow_all_file_types,
-    ) {
+    let mut descriptor = if should_stream_as_video(&sniff, state.config.media_allow_all_file_types)
+    {
         // Video path: stream body directly to disk — never fully buffered in RAM.
         let content_length = headers
             .get("content-length")
