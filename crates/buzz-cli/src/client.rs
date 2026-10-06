@@ -2735,7 +2735,7 @@ mod upload_http_tests {
         let oversized = directory.path().join("oversized.dat");
         let mut file = std::fs::File::create(&oversized).unwrap();
         file.write_all(b"opaque").unwrap();
-        file.set_len(super::super::MAX_NON_VIDEO_BYTES + 1).unwrap();
+        file.set_len(super::MAX_NON_VIDEO_BYTES + 1).unwrap();
         let error = client
             .upload_file(oversized.to_str().unwrap())
             .await
