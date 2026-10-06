@@ -67,6 +67,7 @@ const ALLOWED_MIMES: &[&str] = &[
     "image/gif",
     "image/webp",
     "video/mp4",
+    "application/pdf",
 ];
 
 /// Maximum file size for image uploads (50 MB).
@@ -2327,6 +2328,31 @@ mod retry_policy_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn upload_mime_policy_accepts_pdf_magic_bytes_and_existing_media_types() {
+        let fixtures: &[(&[u8], &str)] = &[
+            (b"%PDF-1.7\nfixture", "application/pdf"),
+            (&[0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, b'J', b'F', b'I', b'F'], "image/jpeg"),
+            (b"\x89PNG\r\n\x1a\n", "image/png"),
+            (b"GIF89a", "image/gif"),
+            (b"RIFF\x00\x00\x00\x00WEBP", "image/webp"),
+            (b"\x00\x00\x00\x18ftypmp42", "video/mp4"),
+        ];
+
+        for (bytes, expected_mime) in fixtures {
+            let mime = infer::get(bytes).map(|kind| kind.mime_type());
+            assert_eq!(mime, Some(*expected_mime));
+            assert!(super::ALLOWED_MIMES.contains(expected_mime));
+        }
+    }
+
+    #[test]
+    fn upload_mime_policy_rejects_active_content_and_executables() {
+        assert!(!super::ALLOWED_MIMES.contains(&"text/html"));
+        assert!(!super::ALLOWED_MIMES.contains(&"application/javascript"));
+        assert!(!super::ALLOWED_MIMES.contains(&"application/x-msdownload"));
+    }
+
     use super::{
         advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
         normalize_events, BuzzClient,
