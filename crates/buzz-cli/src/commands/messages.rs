@@ -707,7 +707,9 @@ pub async fn cmd_send_message(
             .upload_file(file_path)
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
-        media_tags.push(crate::client::build_imeta_tag_with_filename(&desc, &filename));
+        media_tags.push(crate::client::build_imeta_tag_with_filename(
+            &desc, &filename,
+        ));
         media_content.push_str(&attachment_markdown(&desc.mime_type, &filename, &desc.url));
     }
     let final_content = if media_content.is_empty() {
@@ -1103,11 +1105,10 @@ pub async fn dispatch(
 mod tests {
     use super::{
         attachment_filename, attachment_markdown, channel_id_from_event, cmd_get_thread,
-        event_mention_pubkeys, find_root_from_tags,
-        format_events, match_profiles_by_name, merge_message_mentions, missing_members,
-        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
-        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
-        CliError, Uuid,
+        event_mention_pubkeys, find_root_from_tags, format_events, match_profiles_by_name,
+        merge_message_mentions, missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
+        thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1158,11 +1159,7 @@ mod tests {
             "\n![video](https://relay.test/media/blob)"
         );
         assert_eq!(
-            attachment_markdown(
-                "image/avif",
-                "image.avif",
-                "https://relay.test/media/blob",
-            ),
+            attachment_markdown("image/avif", "image.avif", "https://relay.test/media/blob",),
             "\n[image.avif](https://relay.test/media/blob)"
         );
     }

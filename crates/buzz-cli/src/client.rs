@@ -2673,8 +2673,14 @@ mod upload_http_tests {
     async fn uploads_arbitrary_formats_as_bytes_with_inferred_or_fallback_mime() {
         let fixtures: &[(&str, &[u8])] = &[
             ("report.pdf", b"%PDF-1.7\nfixture"),
-            ("page.html", b"<!doctype html><html><body>fixture</body></html>"),
-            ("diagram.svg", b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"),
+            (
+                "page.html",
+                b"<!doctype html><html><body>fixture</body></html>",
+            ),
+            (
+                "diagram.svg",
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+            ),
             ("script.js", b"console.log('fixture');"),
             ("archive.zip", b"PK\x03\x04\x14\x00fixture"),
             ("program.elf", b"\x7fELF\x02\x01\x01\x00fixture"),
@@ -2707,7 +2713,11 @@ mod upload_http_tests {
         let captured = uploads.lock().unwrap();
         assert_eq!(captured.len(), fixtures.len());
         for (captured, (filename, bytes)) in captured.iter().zip(fixtures.iter().copied()) {
-            assert_eq!(captured.content_type, detect_upload_mime(bytes), "{filename}");
+            assert_eq!(
+                captured.content_type,
+                detect_upload_mime(bytes),
+                "{filename}"
+            );
             assert_eq!(captured.body.as_slice(), bytes, "{filename}");
             assert!(captured.authenticated, "{filename} must retain upload auth");
         }
@@ -2720,10 +2730,7 @@ mod upload_http_tests {
         let directory = tempfile::tempdir().unwrap();
 
         let missing = directory.path().join("missing.html");
-        assert!(client
-            .upload_file(missing.to_str().unwrap())
-            .await
-            .is_err());
+        assert!(client.upload_file(missing.to_str().unwrap()).await.is_err());
 
         let oversized = directory.path().join("oversized.dat");
         let mut file = std::fs::File::create(&oversized).unwrap();
