@@ -2332,7 +2332,10 @@ mod tests {
     fn upload_mime_policy_accepts_pdf_magic_bytes_and_existing_media_types() {
         let fixtures: &[(&[u8], &str)] = &[
             (b"%PDF-1.7\nfixture", "application/pdf"),
-            (&[0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, b'J', b'F', b'I', b'F'], "image/jpeg"),
+            (
+                &[0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, b'J', b'F', b'I', b'F'],
+                "image/jpeg",
+            ),
             (b"\x89PNG\r\n\x1a\n", "image/png"),
             (b"GIF89a", "image/gif"),
             (b"RIFF\x00\x00\x00\x00WEBP", "image/webp"),
