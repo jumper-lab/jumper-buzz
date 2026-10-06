@@ -60,7 +60,7 @@ hex = { workspace = true }
 # Byte buffers returned by authenticated media downloads
 bytes = "1"
 
-# MIME type detection via magic bytes — file upload validation
+# MIME detection via magic bytes — upload transport metadata
 infer = "0.19"
 
 # URL parsing — extract server domain for Blossom auth tag

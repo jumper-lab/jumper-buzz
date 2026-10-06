@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
 use nostr::PublicKey;
 use uuid::Uuid;
@@ -608,6 +610,55 @@ pub struct SendMessageParams {
     pub mentions: Vec<String>,
 }
 
+fn attachment_filename(file_path: &str) -> String {
+    let basename = Path::new(file_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "attachment".to_string());
+    let filename: String = basename
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect();
+    if filename.is_empty() {
+        "attachment".to_string()
+    } else {
+        filename
+    }
+}
+
+fn escape_markdown_label(filename: &str) -> String {
+    let mut escaped = String::with_capacity(filename.len());
+    for character in filename.chars() {
+        match character {
+            '\\' | '[' | ']' | '`' => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn attachment_markdown(mime_type: &str, filename: &str, url: &str) -> String {
+    match mime_type {
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" => {
+            format!("\n![image]({url})")
+        }
+        "video/mp4" => format!("\n![video]({url})"),
+        _ => format!("\n[{}]({url})", escape_markdown_label(filename)),
+    }
+}
+
 pub async fn cmd_send_message(
     client: &BuzzClient,
     mut p: SendMessageParams,
@@ -651,18 +702,13 @@ pub async fn cmd_send_message(
     let mut media_tags: Vec<Vec<String>> = Vec::new();
     let mut media_content = String::new();
     for file_path in &p.files {
+        let filename = attachment_filename(file_path);
         let desc = client
             .upload_file(file_path)
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
-        media_tags.push(crate::client::build_imeta_tag(&desc));
-        if desc.mime_type.starts_with("video/") {
-            media_content.push_str("\n![video](");
-        } else {
-            media_content.push_str("\n![image](");
-        }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
+        media_tags.push(crate::client::build_imeta_tag_with_filename(&desc, &filename));
+        media_content.push_str(&attachment_markdown(&desc.mime_type, &filename, &desc.url));
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
@@ -1056,7 +1102,8 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
+        attachment_filename, attachment_markdown, channel_id_from_event, cmd_get_thread,
+        event_mention_pubkeys, find_root_from_tags,
         format_events, match_profiles_by_name, merge_message_mentions, missing_members,
         normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
         resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
@@ -1077,6 +1124,64 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    #[test]
+    fn generic_attachments_keep_the_basename_and_are_links_not_inline_images() {
+        let filename = attachment_filename("/private/work/report.html");
+        assert_eq!(filename, "report.html");
+        for mime in [
+            "application/pdf",
+            "text/html",
+            "image/svg+xml",
+            "application/javascript",
+            "application/zip",
+            "application/x-executable",
+            "audio/mpeg",
+            "application/octet-stream",
+        ] {
+            let fragment = attachment_markdown(mime, &filename, "https://relay.test/media/blob");
+            assert_eq!(fragment, "\n[report.html](https://relay.test/media/blob)");
+            assert!(!fragment.starts_with("\n!["), "{mime} must not be inline");
+        }
+    }
+
+    #[test]
+    fn known_media_previews_remain_and_other_images_are_download_links() {
+        for mime in ["image/jpeg", "image/png", "image/gif", "image/webp"] {
+            assert_eq!(
+                attachment_markdown(mime, "photo.png", "https://relay.test/media/blob"),
+                "\n![image](https://relay.test/media/blob)"
+            );
+        }
+        assert_eq!(
+            attachment_markdown("video/mp4", "clip.mp4", "https://relay.test/media/blob"),
+            "\n![video](https://relay.test/media/blob)"
+        );
+        assert_eq!(
+            attachment_markdown(
+                "image/avif",
+                "image.avif",
+                "https://relay.test/media/blob",
+            ),
+            "\n[image.avif](https://relay.test/media/blob)"
+        );
+    }
+
+    #[test]
+    fn attachment_markdown_escapes_untrusted_filename_labels() {
+        assert_eq!(
+            attachment_markdown(
+                "text/html",
+                "<diagram>[1].svg",
+                "https://relay.test/media/blob",
+            ),
+            "\n[&lt;diagram&gt;\\[1\\].svg](https://relay.test/media/blob)"
+        );
+        assert_eq!(
+            attachment_filename("/private/line\nbreak.txt"),
+            "line_break.txt",
+        );
+    }
 
     #[test]
     fn compact_event_format_remains_the_three_key_contract() {
