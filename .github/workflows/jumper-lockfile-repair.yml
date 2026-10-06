@@ -1,0 +1,23 @@
+name: Jumper lockfile repair
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/jumper-lockfile-repair.yml'
+permissions:
+  contents: read
+jobs:
+  lockfile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Resolve patched TLS dependencies without building
+        run: |
+          cargo update -p rustls --precise 0.23.45
+          cargo tree --locked -i rustls
+          git diff -- Cargo.lock
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: jumper-patched-cargo-lock
+          path: Cargo.lock
+          retention-days: 7
