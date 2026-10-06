@@ -250,6 +250,20 @@ pub async fn process_file_upload(
     body: Bytes,
     attribution: Option<UploadAttribution>,
 ) -> Result<BlobDescriptor, MediaError> {
+    process_file_upload_with_policy(storage, config, ctx, auth_event, body, false, attribution)
+        .await
+}
+
+/// Process a generic file upload using the relay's explicit file-type policy.
+pub async fn process_file_upload_with_policy(
+    storage: &MediaStorage,
+    config: &MediaConfig,
+    ctx: &TenantContext,
+    auth_event: &nostr::Event,
+    body: Bytes,
+    allow_all_file_types: bool,
+    attribution: Option<UploadAttribution>,
+) -> Result<BlobDescriptor, MediaError> {
     process_buffered_upload(
         BufferedUploadInput {
             storage,
@@ -259,7 +273,7 @@ pub async fn process_file_upload(
             body,
             attribution,
         },
-        |bytes, cfg| validate_file_content(bytes, cfg),
+        move |bytes, cfg| validate_file_content_with_policy(bytes, cfg, allow_all_file_types),
         |input| async move {
             // Minimal sidecar — no thumbnail/dim/blurhash/duration for generic files.
             let meta = BlobMeta {

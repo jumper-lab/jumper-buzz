@@ -46,7 +46,11 @@ enum UploadRouteMode {
     LegacyMedia,
 }
 
-fn should_stream_as_video(sniff: &[u8]) -> bool {
+fn should_stream_as_video(sniff: &[u8], allow_all_file_types: bool) -> bool {
+    if allow_all_file_types {
+        return infer::get(sniff).is_some_and(|kind| kind.mime_type() == "video/mp4")
+            || buzz_media::looks_like_mp4_iso_bmff(sniff);
+    }
     infer::get(sniff).is_some_and(|kind| kind.mime_type() == "video/mp4")
         || buzz_media::looks_like_iso_bmff(sniff)
 }
@@ -335,7 +339,10 @@ pub async fn upload_blob(
     }
     let replay = futures_util::stream::iter(replay_chunks.into_iter().map(Ok)).chain(source);
 
-    let mut descriptor = if should_stream_as_video(&sniff) {
+    let mut descriptor = if should_stream_as_video(
+        &sniff,
+        state.config.media_allow_all_file_types,
+    ) {
         // Video path: stream body directly to disk — never fully buffered in RAM.
         let content_length = headers
             .get("content-length")
@@ -387,12 +394,13 @@ pub async fn upload_blob(
                 .unwrap_or_else(|| "application/octet-stream".to_string());
             return Err(MediaError::DisallowedContentType(mime));
         } else {
-            buzz_media::process_file_upload(
+            buzz_media::process_file_upload_with_policy(
                 &state.media_storage,
                 &state.config.media,
                 &auth.tenant,
                 &auth.auth_event,
                 bytes,
+                state.config.media_allow_all_file_types,
                 attribution,
             )
             .await?
@@ -846,6 +854,16 @@ pub async fn head_blob(
                     ("content-length", size_str.as_str()),
                     ("accept-ranges", "bytes"),
                     ("cache-control", cache_control),
+                    (
+                        "content-disposition",
+                        if buzz_media::serve_inline(&content_type) {
+                            "inline"
+                        } else {
+                            "attachment"
+                        },
+                    ),
+                    ("content-security-policy", "default-src 'none'"),
+                    ("x-content-type-options", "nosniff"),
                 ],
             )
                 .into_response())
@@ -939,10 +957,17 @@ mod tests {
     }
 
     #[test]
-    fn proprietary_iso_bmff_brand_still_uses_video_pipeline() {
-        let bytes = b"\x00\x00\x00\x18ftypPRIV\x00\x00\x00\x00isommp42";
+    fn proprietary_iso_bmff_brand_keeps_strict_default_video_routing() {
+        let bytes = b"\x00\x00\x00\x18ftypPRIV\x00\x00\x00\x00heicmif1";
         assert!(infer::get(bytes).is_none());
-        assert!(should_stream_as_video(bytes));
+        assert!(should_stream_as_video(bytes, false));
+        assert!(!should_stream_as_video(bytes, true));
+
+        let compatible_mp4 = b"\x00\x00\x00\x18ftypPRIV\x00\x00\x00\x00isommp42";
+        assert!(should_stream_as_video(compatible_mp4, true));
+
+        let mp4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isommp42";
+        assert!(should_stream_as_video(mp4, true));
     }
 
     async fn test_state() -> Arc<AppState> {

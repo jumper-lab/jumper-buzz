@@ -49,7 +49,11 @@ pub fn looks_like_iso_bmff(bytes: &[u8]) -> bool {
     iso_bmff_ftyp_payload(bytes).is_some()
 }
 
-pub(crate) fn looks_like_mp4_iso_bmff(bytes: &[u8]) -> bool {
+/// Return whether the `ftyp` box advertises a recognized MP4 brand.
+///
+/// Unlike [`looks_like_iso_bmff`], this excludes other ISO-BMFF media formats
+/// so generic attachment mode can keep non-MP4 containers opaque.
+pub fn looks_like_mp4_iso_bmff(bytes: &[u8]) -> bool {
     let Some(payload) = iso_bmff_ftyp_payload(bytes) else {
         return false;
     };
@@ -143,22 +147,27 @@ fn file_mime_to_ext(mime: &str) -> Option<&'static str> {
 
 /// Validate uploaded bytes for the **generic file** upload path.
 ///
-/// This is the catch-all path for non-media attachments (documents, archives,
-/// text, data). It enforces three things:
-///   1. A size cap (`config.max_file_bytes`).
-///   2. A *deny* list — known active-content and executable MIME types are
-///      rejected even though safe headers already neutralise them.
-///   3. Magic-byte sniffing where possible.
+/// This is the catch-all path for non-canonical-media attachments (documents,
+/// archives, text, data, and — when explicitly enabled — any other format).
+/// It enforces a size cap and, by default, the existing deny-list. With
+/// `allow_all_file_types` enabled, generic metadata is normalized to
+/// `application/octet-stream`; canonical raster images and MP4 remain on their
+/// sanitizer pipelines.
 ///
-/// Files with no detectable signature (plain text, CSV, source code, JSON —
-/// none of which have magic bytes) are accepted as `application/octet-stream`.
-/// They are always served as downloads, so an un-sniffable file can never
-/// execute in the app.
+/// Files with no detectable signature are accepted as opaque downloads.
 ///
 /// Returns `(mime, ext)`.
 pub fn validate_file_content(
     bytes: &[u8],
     config: &MediaConfig,
+) -> Result<(String, String), MediaError> {
+    validate_file_content_with_policy(bytes, config, false)
+}
+
+pub(crate) fn validate_file_content_with_policy(
+    bytes: &[u8],
+    config: &MediaConfig,
+    allow_all_file_types: bool,
 ) -> Result<(String, String), MediaError> {
     // 1. Size cap.
     if bytes.len() as u64 > config.max_file_bytes {
@@ -168,9 +177,36 @@ pub fn validate_file_content(
         });
     }
 
+    if allow_all_file_types {
+        let sniffed = infer::get(bytes);
+        let mime = sniffed.as_ref().map(|kind| kind.mime_type().to_string());
+
+        // Canonical raster images and MP4 must never bypass their established
+        // metadata/EXIF and video validation pipelines.
+        if mime.as_deref().is_some_and(|mime| {
+            ALLOWED_MIME_TYPES.contains(&mime) || mime == "video/mp4"
+        }) || looks_like_mp4_iso_bmff(bytes)
+        {
+            return Err(MediaError::DisallowedContentType(
+                mime.unwrap_or_else(|| "video/mp4".to_string()),
+            ));
+        }
+
+        let ext = sniffed
+            .as_ref()
+            .and_then(|kind| {
+                file_mime_to_ext(kind.mime_type())
+                    .or_else(|| is_safe_file_ext(kind.extension()).then_some(kind.extension()))
+            })
+            .unwrap_or("bin")
+            .to_string();
+        return Ok(("application/octet-stream".to_string(), ext));
+    }
+
     // ISO-BMFF permits arbitrary major brands, so `infer` cannot enumerate all
-    // valid MP4 signatures. Never let an `ftyp` container fall through as an
-    // opaque attachment merely because its brand is unfamiliar.
+    // valid MP4 signatures. In the default strict policy, never let an `ftyp`
+    // container fall through as an opaque attachment merely because its brand
+    // is unfamiliar.
     if looks_like_iso_bmff(bytes) {
         let mime = infer::get(bytes)
             .map(|kind| kind.mime_type().to_string())
@@ -206,6 +242,14 @@ pub fn validate_file_content(
     }
 }
 
+fn is_safe_file_ext(ext: &str) -> bool {
+    !ext.is_empty()
+        && ext.len() <= 8
+        && ext
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+}
+
 /// Whether a stored blob should be served inline (rendered in the client) or as
 /// an attachment (forced download).
 ///
@@ -214,7 +258,10 @@ pub fn validate_file_content(
 /// PDF is intentionally *not* inline yet — inline PDF preview is a planned
 /// fast-follow; until the renderer handles it, force download like any other file.
 pub fn serve_inline(mime: &str) -> bool {
-    mime.starts_with("image/") || mime.starts_with("video/")
+    matches!(
+        mime,
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "video/mp4"
+    )
 }
 
 /// Metadata extracted from a validated MP4 file.
@@ -1555,9 +1602,55 @@ mod tests {
     }
 
     #[test]
+    fn allow_all_file_types_are_opaque_downloads_and_keep_canonical_pipelines() {
+        let config = test_config();
+        let fixtures: &[(&str, &[u8])] = &[
+            ("html", b"<!doctype html><script>window.neutral=1</script>"),
+            ("svg", b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>"),
+            ("bmp", b"BM\x00\x00\x00\x00\x00\x00\x00\x00"),
+            ("js", b"const neutral = true;"),
+            ("exe", b"MZ\x90\x00neutral fixture"),
+            ("elf", b"\x7fELF\x02\x01\x01neutral fixture"),
+            ("macho", b"\xcf\xfa\xed\xfe\x00\x00\x00\x00neutral fixture"),
+            ("zip", b"PK\x03\x04neutral fixture"),
+            ("audio", b"ID3\x04\x00\x00\x00\x00\x00\x00"),
+            ("unknown", b"\x00\x13\xff\x80arbitrary octets"),
+            ("other-bmff", b"\x00\x00\x00\x18ftypPRIV\x00\x00\x00\x00heicmif1"),
+        ];
+
+        for (name, bytes) in fixtures {
+            let (mime, ext) = validate_file_content_with_policy(bytes, &config, true)
+                .unwrap_or_else(|error| panic!("{name} should be accepted: {error}"));
+            assert_eq!(mime, "application/octet-stream", "{name}");
+            assert!(is_safe_file_ext(&ext), "unsafe extension for {name}: {ext}");
+            assert!(!serve_inline(&mime), "{name} must not render inline");
+        }
+
+        assert!(matches!(
+            validate_file_content_with_policy(TINY_JPEG, &config, true),
+            Err(MediaError::DisallowedContentType(mime)) if mime == "image/jpeg"
+        ));
+        assert_eq!(validate_content(TINY_JPEG, &config).unwrap(), "image/jpeg");
+        assert!(matches!(
+            validate_file_content_with_policy(MP4_FTYP_MAGIC, &config, true),
+            Err(MediaError::DisallowedContentType(_))
+        ));
+    }
+
+    #[test]
+    fn allow_all_file_types_still_enforces_generic_size_limit() {
+        let mut config = test_config();
+        config.max_file_bytes = 4;
+        assert!(matches!(
+            validate_file_content_with_policy(b"12345", &config, true),
+            Err(MediaError::FileTooLarge { size: 5, max: 4 })
+        ));
+    }
+
+    #[test]
     fn test_validate_svg_rejected() {
         let config = test_config();
-        // SVG starts with XML declaration — infer won't detect it as image
+        // SVG with XML declaration — infer won't detect it as image
         let svg = b"<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
         let result = validate_content(svg, &config);
         assert!(result.is_err());
@@ -2591,5 +2684,8 @@ mod tests {
         assert!(!serve_inline("application/octet-stream"));
         assert!(!serve_inline("audio/mpeg"));
         assert!(!serve_inline("text/plain"));
+        assert!(!serve_inline("image/svg+xml"));
+        assert!(!serve_inline("image/bmp"));
+        assert!(!serve_inline("video/quicktime"));
     }
 }

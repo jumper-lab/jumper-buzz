@@ -1,0 +1,213 @@
+name: Relay generic media
+
+on:
+  push:
+    branches:
+      - operador/t_398f3d2f-relay-anexos-genericos
+  pull_request:
+    branches:
+      - jumper/relay-production
+
+permissions:
+  contents: read
+
+concurrency:
+  group: relay-generic-media-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  media-tests-and-deployable-image:
+    name: Media HTTP tests + live-base overlay image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+      DATABASE_URL: postgres://buzz:buzz_ci_password@127.0.0.1:5432/buzz
+      REDIS_URL: redis://127.0.0.1:6379
+      RELAY_URL: ws://localhost:3000
+      BUZZ_BIND_ADDR: 0.0.0.0:3000
+      BUZZ_REQUIRE_AUTH_TOKEN: "false"
+      BUZZ_REQUIRE_RELAY_MEMBERSHIP: "false"
+      BUZZ_REQUIRE_MEDIA_GET_AUTH: "false"
+      BUZZ_MEDIA_ALLOW_ALL_FILE_TYPES: "true"
+      BUZZ_MAX_FILE_BYTES: "65536"
+      BUZZ_MEDIA_UPLOADS_PER_MINUTE: "100"
+      BUZZ_AUTO_MIGRATE: "true"
+      BUZZ_S3_ENDPOINT: http://127.0.0.1:5000
+      BUZZ_S3_ACCESS_KEY: buzz_ci_access
+      BUZZ_S3_SECRET_KEY: buzz_ci_secret_key
+      BUZZ_S3_BUCKET: buzz-media
+      BUZZ_S3_ADDRESSING_STYLE: path
+      BUZZ_S3_REGION: us-east-1
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: buzz
+          POSTGRES_USER: buzz
+          POSTGRES_PASSWORD: buzz_ci_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U buzz -d buzz"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      moto:
+        image: motoserver/moto:5.1.11
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Create isolated S3 bucket in Moto
+        run: |
+          # MinIO's anonymous registry images were withdrawn; Moto is the documented S3-compatible CI substitute.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends python3-boto3
+          /usr/bin/python3 - <<'PY'
+          import os
+          import time
+          import boto3
+
+          client = boto3.client(
+              "s3",
+              endpoint_url=os.environ["BUZZ_S3_ENDPOINT"],
+              aws_access_key_id=os.environ["BUZZ_S3_ACCESS_KEY"],
+              aws_secret_access_key=os.environ["BUZZ_S3_SECRET_KEY"],
+              region_name=os.environ["BUZZ_S3_REGION"],
+          )
+          for attempt in range(60):
+              try:
+                  client.list_buckets()
+                  break
+              except Exception:
+                  if attempt == 59:
+                      raise
+                  time.sleep(1)
+          client.create_bucket(Bucket=os.environ["BUZZ_S3_BUCKET"])
+          PY
+
+      - name: Test relay media path against Postgres, Redis, and Moto S3
+        run: |
+          docker run --rm --network host \
+            -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
+            -e DATABASE_URL -e REDIS_URL -e RELAY_URL -e BUZZ_BIND_ADDR \
+            -e BUZZ_REQUIRE_AUTH_TOKEN -e BUZZ_REQUIRE_RELAY_MEMBERSHIP \
+            -e BUZZ_REQUIRE_MEDIA_GET_AUTH -e BUZZ_MEDIA_ALLOW_ALL_FILE_TYPES \
+            -e BUZZ_MAX_FILE_BYTES -e BUZZ_MEDIA_UPLOADS_PER_MINUTE \
+            -e BUZZ_AUTO_MIGRATE -e BUZZ_S3_ENDPOINT -e BUZZ_S3_ACCESS_KEY \
+            -e BUZZ_S3_SECRET_KEY -e BUZZ_S3_BUCKET -e BUZZ_S3_ADDRESSING_STYLE \
+            -e BUZZ_S3_REGION \
+            rust:1.95-bookworm bash -euc '
+              apt-get update -qq
+              apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev ca-certificates curl git
+              cargo build --locked --release -p buzz-relay --bin buzz-relay
+              target/release/buzz-relay >/tmp/buzz-relay-ci.log 2>&1 &
+              relay_pid=$!
+              trap "kill $relay_pid 2>/dev/null || true; wait $relay_pid 2>/dev/null || true" EXIT
+              ready=false
+              for attempt in $(seq 1 90); do
+                if curl --silent --fail http://127.0.0.1:3000/health >/dev/null; then
+                  ready=true
+                  break
+                fi
+                if ! kill -0 "$relay_pid" 2>/dev/null; then
+                  cat /tmp/buzz-relay-ci.log
+                  exit 1
+                fi
+                sleep 1
+              done
+              if [ "$ready" != true ]; then
+                cat /tmp/buzz-relay-ci.log
+                exit 1
+              fi
+              cargo test --locked -p buzz-media --lib
+              cargo test --locked -p buzz-relay --lib media_get_auth_flag_on_rejects_unauthenticated_get_and_head_before_sidecar_gate
+              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked -p buzz-test-client --test e2e_media_any_type -- --ignored --nocapture
+              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked -p buzz-test-client --test e2e_media test_upload_and_get -- --ignored --nocapture
+              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked -p buzz-test-client --test e2e_media_extended test_upload_png_roundtrip -- --ignored --nocapture
+              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked -p buzz-test-client --test e2e_media_extended test_upload_gif_roundtrip -- --ignored --nocapture
+              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked -p buzz-test-client --test e2e_media_extended test_upload_webp_roundtrip -- --ignored --nocapture
+              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked -p buzz-test-client --test e2e_media_video test_video_upload_and_get -- --ignored --nocapture
+              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked -p buzz-test-client --test e2e_media_video test_video_range_request_206 -- --ignored --nocapture
+            '
+
+      - name: Build Docker image as a binary-only overlay on the exact live image
+        id: overlay
+        run: |
+          set -euo pipefail
+          base='ghcr.io/block/buzz@sha256:a2b59030b29242adb0783a05cbabd63f51518fdfe7b724845a68f77adab7e1f9'
+          source_commit="$(git rev-parse HEAD)"
+          base_commit="$(git rev-parse HEAD^)"
+          image="buzz-relay-live-overlay:${source_commit}"
+          context="$RUNNER_TEMP/buzz-relay-overlay-context"
+          output="$RUNNER_TEMP/buzz-relay-deployable"
+          mkdir -p "$context" "$output"
+          cp target/release/buzz-relay "$context/buzz-relay"
+          cp deploy/relay-live-overlay.Dockerfile "$context/Dockerfile"
+          docker pull "$base"
+          base_runtime="$(docker image inspect --format '{{json .Config.Entrypoint}}|{{.Config.User}}' "$base")"
+          docker build --platform linux/amd64 --tag "$image" "$context"
+          overlay_runtime="$(docker image inspect --format '{{json .Config.Entrypoint}}|{{.Config.User}}' "$image")"
+          test "$overlay_runtime" = "$base_runtime"
+          docker save --output "$output/buzz-relay-live-overlay.tar" "$image"
+          binary_sha="$(sha256sum "$context/buzz-relay" | cut -d' ' -f1)"
+          image_id="$(docker image inspect --format '{{.Id}}' "$image")"
+          printf 'source_commit=%s\nbase_commit=%s\nbase_image=%s\nimage_tag=%s\nimage_id=%s\nplatform=linux/amd64\nentrypoint_and_user_preserved=true\nbinary_sha256=%s\npolicy_env=BUZZ_MEDIA_ALLOW_ALL_FILE_TYPES (runtime opt-in; image default remains off)\n' \
+            "$source_commit" "$base_commit" "$base" "$image" "$image_id" "$binary_sha" > "$output/manifest.txt"
+          (cd "$output" && sha256sum buzz-relay-live-overlay.tar manifest.txt > SHA256SUMS)
+          printf 'artifact_dir=%s\nsource_commit=%s\n' "$output" "$source_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-start the deployable overlay image
+        env:
+          RELAY_IMAGE: buzz-relay-live-overlay-${{ steps.overlay.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          name=buzz-relay-overlay-smoke
+          docker run --detach --name "$name" --network host \
+            --env DATABASE_URL --env REDIS_URL --env RELAY_URL --env BUZZ_BIND_ADDR \
+            --env BUZZ_REQUIRE_AUTH_TOKEN --env BUZZ_REQUIRE_RELAY_MEMBERSHIP \
+            --env BUZZ_REQUIRE_MEDIA_GET_AUTH --env BUZZ_MEDIA_ALLOW_ALL_FILE_TYPES \
+            --env BUZZ_MAX_FILE_BYTES --env BUZZ_MEDIA_UPLOADS_PER_MINUTE \
+            --env BUZZ_AUTO_MIGRATE --env BUZZ_S3_ENDPOINT --env BUZZ_S3_ACCESS_KEY \
+            --env BUZZ_S3_SECRET_KEY --env BUZZ_S3_BUCKET --env BUZZ_S3_ADDRESSING_STYLE \
+            --env BUZZ_S3_REGION "$RELAY_IMAGE"
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          ready=false
+          for attempt in $(seq 1 90); do
+            if curl --silent --fail http://127.0.0.1:3000/health >/dev/null; then
+              ready=true
+              break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' "$name")" != true ]; then
+              docker logs "$name"
+              exit 1
+            fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            docker logs "$name"
+            exit 1
+          fi
+          printf 'overlay_image=%s served /health successfully\n' "$RELAY_IMAGE"
+
+      - name: Upload deployable image tar, manifest, and checksums
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: buzz-relay-live-overlay-${{ steps.overlay.outputs.source_commit }}
+          path: ${{ steps.overlay.outputs.artifact_dir }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
