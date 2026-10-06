@@ -1,0 +1,27 @@
+name: Jumper official MinIO probe
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/jumper-minio-probe.yml'
+permissions:
+  contents: read
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Pull official images and capture immutable digests
+        run: |
+          set -eu
+          mkdir evidence
+          for image in quay.io/minio/minio:latest quay.io/minio/mc:latest; do
+            docker pull "$image"
+            docker image inspect "$image" --format '{{json .RepoDigests}}' >> evidence/digests.jsonl
+            docker image inspect "$image" --format '{{.Architecture}} {{.Os}}' >> evidence/platforms.txt
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: jumper-minio-probe
+          path: evidence/
+          retention-days: 7

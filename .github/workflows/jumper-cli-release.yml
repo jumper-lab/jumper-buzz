@@ -1,0 +1,35 @@
+name: Jumper CLI verified build
+on:
+  pull_request:
+    paths:
+      - 'crates/buzz-cli/**'
+      - 'Cargo.lock'
+      - '.github/workflows/jumper-cli-release.yml'
+permissions:
+  contents: read
+jobs:
+  cli:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test CLI
+        run: cargo test --locked -p buzz-cli
+      - name: Build CLI
+        run: cargo build --locked --release -p buzz-cli
+      - name: Package verified binary
+        run: |
+          mkdir -p jumper-cli-artifact
+          cp target/release/buzz jumper-cli-artifact/buzz
+          printf '%s\n' '${{ github.event.pull_request.head.sha }}' > jumper-cli-artifact/SOURCE_COMMIT
+          cd jumper-cli-artifact
+          sha256sum buzz > SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: jumper-buzz-cli-linux-amd64
+          path: jumper-cli-artifact/
+          retention-days: 14
