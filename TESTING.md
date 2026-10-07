@@ -262,6 +262,16 @@ Replies are kind:9 in the same channel; `buzz messages thread --channel <id>
 
 ---
 
+## Arbitrary media policy regression
+
+`BUZZ_MEDIA_ALLOW_ALL_FILE_TYPES` defaults to `false`; set it to `true` or `1` to accept non-canonical bytes as `application/octet-stream` downloads. Authentication, per-file limits and tenant binding remain in force. JPEG/PNG/GIF/WebP sanitization and validated MP4 processing are unchanged.
+
+The opt-in applies to both `/upload` and its legacy `/media/upload` alias. With the flag disabled, the legacy alias retains its original media-only behavior. WebM and QuickTime are opaque downloads, not validated MP4 previews, and use the ordinary file-size cap; only MP4 receives the larger video preflight budget in the CLI.
+
+The isolated relay HTTP regression is `crates/buzz-test-client/tests/e2e_media_any_type.rs` and requires Postgres, Redis and an S3-compatible endpoint. `.github/workflows/relay-generic-media.yml` runs it against Moto 5.1.11 because the historical MinIO Docker Hub images are no longer anonymously pullable. This exercises real S3 HTTP requests against a compatible test server; it is not a claim of MinIO-specific certification.
+
+---
+
 ## Configuration reference
 
 The relay reads all configuration from environment variables. Defaults work
@@ -278,6 +288,7 @@ out of the box with `just setup` or `just relay`. Common overrides:
 | `BUZZ_REQUIRE_AUTH_TOKEN`       | `false`                     | When true, REST requires NIP-98 (no `X-Pubkey` fallback) |
 | `BUZZ_REQUIRE_RELAY_MEMBERSHIP` | `false`                     | When true, only pubkeys in `relay_members` can connect |
 | `BUZZ_REQUIRE_MEDIA_GET_AUTH`   | `false`                     | When true, `GET`/`HEAD /media/*` require Blossom kind 24242 `t=get` auth plus relay membership. |
+| `BUZZ_MEDIA_ALLOW_ALL_FILE_TYPES` | `false`                  | When true, non-canonical files are accepted as inert `application/octet-stream` downloads; size limits and upload auth remain enforced. Raster images and validated MP4 keep their sanitizer pipelines. |
 | `BUZZ_AUDIT_ENABLED`            | `true`                      | Tamper-evident event/media audit log. Set `false`/`0`/`off` to skip its DB pool and writes. Does not disable the separate moderation audit trail. |
 | `BUZZ_AUTO_MIGRATE`             | `false`                     | Opt in with `true`/`1`/`yes`/`on` to run embedded SQLx migrations on relay startup |
 | `RELAY_OWNER_PUBKEY`              | unset                       | Bootstrapped as `owner` in `relay_members` at first start |

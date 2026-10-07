@@ -202,6 +202,8 @@ pub struct Config {
 
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
+    /// Allow arbitrary non-canonical media formats as opaque downloads. Default off.
+    pub media_allow_all_file_types: bool,
     /// Maximum concurrent media uploads handled by one relay process.
     pub media_max_concurrent_uploads: usize,
     /// Maximum concurrent media uploads accepted from one pubkey.
@@ -675,6 +677,9 @@ impl Config {
                 ));
             }
         };
+        let media_allow_all_file_types = std::env::var("BUZZ_MEDIA_ALLOW_ALL_FILE_TYPES")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
         let media = buzz_media::MediaConfig {
             s3_endpoint: std::env::var("BUZZ_S3_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
@@ -962,6 +967,7 @@ impl Config {
             relay_operator_pubkeys,
             allow_nip_oa_auth,
             media,
+            media_allow_all_file_types,
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
@@ -1029,6 +1035,10 @@ mod tests {
         assert!(
             !config.allow_nip_oa_auth,
             "allow_nip_oa_auth should default to false"
+        );
+        assert!(
+            !config.media_allow_all_file_types,
+            "arbitrary media downloads should default to off"
         );
         assert!(
             !config.serve_git_web_gui,
