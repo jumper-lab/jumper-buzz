@@ -1,0 +1,195 @@
+name: Relay dependency lockfile repair
+
+on:
+  pull_request:
+    branches:
+      - jumper/relay-production
+    paths:
+      - .github/workflows/relay-lockfile-repair.yml
+      - Cargo.lock
+      - Cargo.toml
+
+permissions:
+  contents: read
+
+jobs:
+  relay-dependency-scan:
+    name: Lock patched relay dependencies and scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact PR head
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Activate the repository toolchain
+        uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+
+      - name: Prepare evidence directory
+        run: mkdir -p .ci-relay-dependency-evidence
+
+      - name: Update only fixed advisory releases
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo update -p rustls --precise 0.23.45
+          cargo update -p h2 --precise 0.4.16
+          cargo update -p nostr --precise 0.44.7
+          git diff --exit-code -- Cargo.toml
+          git diff -- Cargo.lock > .ci-relay-dependency-evidence/Cargo.lock.diff
+          git rev-parse HEAD > .ci-relay-dependency-evidence/source-head.txt
+          python3 - <<'PY'
+          import re
+          import tomllib
+          from pathlib import Path
+
+          fixes = {"rustls": (0, 23, 45), "h2": (0, 4, 16), "nostr": (0, 44, 7)}
+          lock = tomllib.loads(Path("Cargo.lock").read_text())
+          problems = []
+          for name, fixed in fixes.items():
+              versions = sorted({p["version"] for p in lock["package"] if p["name"] == name})
+              if not versions:
+                  problems.append(f"{name}: absent from Cargo.lock")
+                  continue
+              old = [v for v in versions if tuple(int(x) for x in re.match(r"^(\d+)\.(\d+)\.(\d+)", v).groups()) < fixed]
+              print(f"{name}: locked={','.join(versions)} fixed_at={'.'.join(map(str, fixed))}")
+              if old:
+                  problems.append(f"{name}: vulnerable versions remain: {','.join(old)}")
+          if problems:
+              raise SystemExit("\n".join(problems))
+          PY
+
+      - name: Trace the production relay default-feature graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence=.ci-relay-dependency-evidence
+          target=x86_64-unknown-linux-gnu
+          # No --no-default-features: this is buzz-relay's normal/default graph.
+          cargo tree --locked -p buzz-relay --target "$target" --edges features \
+            > "$evidence/relay-default-feature-tree.txt"
+          for package in rustls h2 nostr nostr-relay-pool; do
+            if cargo tree --locked -p buzz-relay --target "$target" \
+                --edges features -i "$package" \
+                > "$evidence/relay-default-route-$package.txt" 2>&1; then
+              printf 'reachable in relay default graph\n' > "$evidence/relay-default-route-$package.status"
+            else
+              printf 'not present in relay default graph\n' > "$evidence/relay-default-route-$package.status"
+            fi
+          done
+          # Keep dev/test dependencies separate from the production binary graph.
+          if cargo tree --locked -p buzz-relay --target "$target" \
+              --edges all -i nostr-relay-pool \
+              > "$evidence/relay-dev-route-nostr-relay-pool.txt" 2>&1; then
+            printf 'reachable with relay dev/test edges included\n' \
+              > "$evidence/relay-dev-route-nostr-relay-pool.status"
+          else
+            printf 'not present in relay dev graph for this target\n' \
+              > "$evidence/relay-dev-route-nostr-relay-pool.status"
+          fi
+          # Attribute workspace-only findings to their actual root packages.
+          for package in nostr-relay-pool webbrowser; do
+            if cargo tree --locked --workspace --target "$target" \
+                --edges all -i "$package" \
+                > "$evidence/workspace-route-$package.txt" 2>&1; then
+              printf 'reachable in some workspace member graph\n' \
+                > "$evidence/workspace-route-$package.status"
+            else
+              printf 'not reachable in target-filtered workspace graph\n' \
+                > "$evidence/workspace-route-$package.status"
+            fi
+          done
+          # Record the separate workspace consumer for the webbrowser finding.
+          if cargo tree --locked -p buzz-agent --target "$target" \
+              --edges features -i webbrowser \
+              > "$evidence/buzz-agent-route-webbrowser.txt" 2>&1; then
+            printf 'reachable from buzz-agent; outside buzz-relay\n' \
+              > "$evidence/buzz-agent-route-webbrowser.status"
+          else
+            printf 'not present in buzz-agent graph for this target\n' \
+              > "$evidence/buzz-agent-route-webbrowser.status"
+          fi
+
+          python3 - <<'PY'
+          import re
+          import tomllib
+          from pathlib import Path
+
+          evidence = Path(".ci-relay-dependency-evidence")
+          tree = (evidence / "relay-default-feature-tree.txt").read_text()
+          lock = tomllib.loads(Path("Cargo.lock").read_text())
+          fixes = {"rustls": (0, 23, 45), "h2": (0, 4, 16), "nostr": (0, 44, 7)}
+          report = [
+              "Production scope: cargo tree --locked -p buzz-relay --target x86_64-unknown-linux-gnu --edges features.",
+              "Default features remain enabled; the package manifest names buzz-relay as default-run and bin.",
+          ]
+          failed = []
+          for name, fixed in fixes.items():
+              matches = sorted(set(re.findall(r"(?<![A-Za-z0-9_-])" + re.escape(name) + r" v([^\s()]+)", tree)))
+              lock_versions = sorted({p["version"] for p in lock["package"] if p["name"] == name})
+              report.append(f"{name}: relay_graph={','.join(matches) or 'absent'}; lock={','.join(lock_versions) or 'absent'}; fixed_at={'.'.join(map(str, fixed))}")
+              if not matches or any(tuple(int(x) for x in re.match(r"^(\d+)\.(\d+)\.(\d+)", v).groups()) < fixed for v in matches):
+                  failed.append(f"{name} is absent from or below the fixed version in the relay default graph")
+          for name, status_file in (("nostr-relay-pool", "relay-default-route-nostr-relay-pool.status"),):
+              status = (evidence / status_file).read_text().strip()
+              dev = (evidence / "relay-dev-route-nostr-relay-pool.status").read_text().strip()
+              workspace = (evidence / "workspace-route-nostr-relay-pool.status").read_text().strip()
+              report.append(f"{name}: production={status}; dev/test={dev}; workspace={workspace}")
+          report.append("webbrowser: " + (evidence / "workspace-route-webbrowser.status").read_text().strip())
+          report.append("webbrowser root: " + (evidence / "buzz-agent-route-webbrowser.status").read_text().strip())
+          report.append("Full-workspace cargo-deny output is preserved separately; no advisories are ignored here.")
+          (evidence / "relay-scan-summary.txt").write_text("\n".join(report) + "\n")
+          print("\n".join(report))
+          if failed:
+              raise SystemExit("\n".join(failed))
+          PY
+
+      - name: Scan the full workspace without suppressing baseline findings
+        shell: bash
+        run: |
+          set +e
+          cargo deny check > .ci-relay-dependency-evidence/cargo-deny-workspace.txt 2>&1
+          status=$?
+          printf 'cargo deny check exit status: %s\n' "$status" \
+            > .ci-relay-dependency-evidence/cargo-deny-workspace.status
+          printf 'cargo deny check exit status: %s\n' "$status" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ]; then
+            printf 'Full-workspace findings are retained for reachability classification; no deny entries were added.\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit 0
+
+      - name: Record fixed advisory IDs and lockfile checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence=.ci-relay-dependency-evidence
+          python3 - <<'PY'
+          from pathlib import Path
+
+          scan = Path(".ci-relay-dependency-evidence/cargo-deny-workspace.txt").read_text(errors="replace")
+          ids = [
+              "RUSTSEC-2026-0258", "RUSTSEC-2026-0285",
+              "RUSTSEC-2026-0225", "RUSTSEC-2026-0226", "RUSTSEC-2026-0227",
+              "RUSTSEC-2026-0228", "RUSTSEC-2026-0229", "RUSTSEC-2026-0230",
+          ]
+          with Path(".ci-relay-dependency-evidence/fixed-advisory-scan.txt").open("w") as f:
+              for advisory in ids:
+                  state = "still reported in full workspace" if advisory in scan else "not reported after lock update"
+                  f.write(f"{advisory}: {state}\n")
+          PY
+          cp Cargo.lock "$evidence/Cargo.lock"
+          sha256sum "$evidence/Cargo.lock" > "$evidence/SHA256SUMS"
+
+      - name: Upload lockfile and scan evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: relay-lockfile-scan-${{ github.event.pull_request.head.sha }}
+          path: |
+            .ci-relay-dependency-evidence/**
+          if-no-files-found: error
+          retention-days: 7
