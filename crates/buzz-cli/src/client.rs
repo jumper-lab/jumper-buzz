@@ -60,18 +60,18 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "video/mp4",
-    "application/pdf",
-];
+/// Build a NIP-92 `imeta` tag that also preserves the source filename.
+///
+/// The filename is metadata only; it does not change how the CLI transports or
+/// previews the bytes. Callers should pass a basename rather than a local path.
+pub fn build_imeta_tag_with_filename(d: &BlobDescriptor, filename: &str) -> Vec<String> {
+    let mut tag = build_imeta_tag(d);
+    tag.push(format!("filename {filename}"));
+    tag
+}
 
-/// Maximum file size for image uploads (50 MB).
-const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
+/// Maximum file size for non-video uploads (50 MiB).
+const MAX_NON_VIDEO_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
@@ -203,6 +203,22 @@ fn should_retry_legacy_upload(status: reqwest::StatusCode) -> bool {
         status,
         reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED
     )
+}
+
+fn detect_upload_mime(bytes: &[u8]) -> String {
+    infer::get(bytes)
+        .map(|kind| kind.mime_type().to_string())
+        .unwrap_or_else(|| "application/octet-stream".to_string())
+}
+
+// Only MP4 enters the relay's validated video pipeline. Other video formats
+// are opaque files and must use the ordinary file preflight budget.
+fn upload_size_limit(mime: &str) -> u64 {
+    if mime == "video/mp4" {
+        MAX_VIDEO_BYTES
+    } else {
+        MAX_NON_VIDEO_BYTES
+    }
 }
 
 /// Returns `true` for moderation command kinds (9040–9044).
@@ -1131,20 +1147,10 @@ impl BuzzClient {
             .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
 
         // 2. Detect MIME from magic bytes
-        let mime = infer::get(&bytes)
-            .map(|t| t.mime_type().to_string())
-            .unwrap_or_else(|| "application/octet-stream".to_string());
-
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
+        let mime = detect_upload_mime(&bytes);
 
         // 3. Size check
-        let max = if mime.starts_with("video/") {
-            MAX_VIDEO_BYTES
-        } else {
-            MAX_IMAGE_BYTES
-        };
+        let max = upload_size_limit(&mime);
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
                 "file too large: {} bytes (max {})",
@@ -1158,7 +1164,7 @@ impl BuzzClient {
 
         // 5. PUT request to the BUD-02 /upload endpoint with a generous timeout.
         // Auth is signed per attempt — matches the per-attempt signing pattern in download_media.
-        let upload_timeout = if mime.starts_with("video/") {
+        let upload_timeout = if mime == "video/mp4" {
             Duration::from_secs(600)
         } else {
             Duration::from_secs(120)
@@ -2329,7 +2335,24 @@ mod retry_policy_tests {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn upload_mime_policy_accepts_pdf_magic_bytes_and_existing_media_types() {
+    fn upload_limits_reserve_larger_budget_for_validated_mp4_only() {
+        assert_eq!(
+            super::upload_size_limit("video/mp4"),
+            super::MAX_VIDEO_BYTES
+        );
+        for mime in [
+            "video/webm",
+            "video/quicktime",
+            "video/x-matroska",
+            "audio/mpeg",
+            "application/octet-stream",
+        ] {
+            assert_eq!(super::upload_size_limit(mime), super::MAX_NON_VIDEO_BYTES);
+        }
+    }
+
+    #[test]
+    fn upload_mime_detection_keeps_existing_media_and_defaults_unknown_bytes() {
         let fixtures: &[(&[u8], &str)] = &[
             (b"%PDF-1.7\nfixture", "application/pdf"),
             (
@@ -2343,17 +2366,30 @@ mod tests {
         ];
 
         for (bytes, expected_mime) in fixtures {
-            let mime = infer::get(bytes).map(|kind| kind.mime_type());
-            assert_eq!(mime, Some(*expected_mime));
-            assert!(super::ALLOWED_MIMES.contains(expected_mime));
+            assert_eq!(super::detect_upload_mime(bytes), *expected_mime);
         }
+        assert_eq!(
+            super::detect_upload_mime(b"opaque bytes with no recognized signature"),
+            "application/octet-stream"
+        );
     }
 
     #[test]
-    fn upload_mime_policy_rejects_active_content_and_executables() {
-        assert!(!super::ALLOWED_MIMES.contains(&"text/html"));
-        assert!(!super::ALLOWED_MIMES.contains(&"application/javascript"));
-        assert!(!super::ALLOWED_MIMES.contains(&"application/x-msdownload"));
+    fn imeta_tag_preserves_filename_for_generic_attachments() {
+        let descriptor = super::BlobDescriptor {
+            url: "https://relay.test/media/blob".to_string(),
+            sha256: "a".repeat(64),
+            size: 12,
+            mime_type: "application/octet-stream".to_string(),
+            uploaded: 0,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+        };
+        let tag = super::build_imeta_tag_with_filename(&descriptor, "unknown-format.dat");
+        assert!(tag.contains(&"filename unknown-format.dat".to_string()));
+        assert!(tag.contains(&"m application/octet-stream".to_string()));
     }
 
     use super::{
@@ -2581,5 +2617,156 @@ mod tests {
             built.headers().get("x-auth-tag").is_none(),
             "x-auth-tag header must not be present when no auth tag is configured"
         );
+    }
+}
+
+#[cfg(test)]
+mod upload_http_tests {
+    use std::io::Write;
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::State;
+    use axum::http::{header::CONTENT_TYPE, HeaderMap, StatusCode};
+    use axum::routing::put;
+    use axum::{Json, Router};
+    use bytes::Bytes;
+    use nostr::Keys;
+    use tokio::net::TcpListener;
+
+    use super::super::error::CliError;
+    use super::{detect_upload_mime, BuzzClient};
+
+    #[derive(Debug, Clone)]
+    struct CapturedUpload {
+        content_type: String,
+        body: Vec<u8>,
+        authenticated: bool,
+    }
+
+    type Uploads = Arc<Mutex<Vec<CapturedUpload>>>;
+
+    async fn upload_server() -> (String, Uploads) {
+        let uploads: Uploads = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route(
+                "/upload",
+                put(
+                    |State(uploads): State<Uploads>, headers: HeaderMap, body: Bytes| async move {
+                        let content_type = headers
+                            .get(CONTENT_TYPE)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("application/octet-stream")
+                            .to_string();
+                        let sha256 = headers
+                            .get("x-sha-256")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
+                        let authenticated = headers.get("authorization").is_some_and(|value| {
+                            value.to_str().is_ok_and(|v| v.starts_with("Nostr "))
+                        });
+                        let size = body.len();
+                        uploads.lock().unwrap().push(CapturedUpload {
+                            content_type: content_type.clone(),
+                            body: body.to_vec(),
+                            authenticated,
+                        });
+                        (
+                            StatusCode::OK,
+                            Json(serde_json::json!({
+                                "url": "https://relay.test/media/blob",
+                                "sha256": sha256,
+                                "size": size,
+                                "type": content_type,
+                                "uploaded": 0
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(uploads.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), uploads)
+    }
+
+    #[tokio::test]
+    async fn uploads_arbitrary_formats_as_bytes_with_inferred_or_fallback_mime() {
+        let fixtures: &[(&str, &[u8])] = &[
+            ("report.pdf", b"%PDF-1.7\nfixture"),
+            (
+                "page.html",
+                b"<!doctype html><html><body>fixture</body></html>",
+            ),
+            (
+                "diagram.svg",
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+            ),
+            ("script.js", b"console.log('fixture');"),
+            ("archive.zip", b"PK\x03\x04\x14\x00fixture"),
+            ("program.elf", b"\x7fELF\x02\x01\x01\x00fixture"),
+            ("program.exe", b"MZ\x90\x00fixture"),
+            ("program.macho", b"\xcf\xfa\xed\xfe\x07\x00\x00\x01fixture"),
+            ("sample.mp3", b"ID3\x03\x00\x00\x00\x00\x00\x00fixture"),
+            ("notes.txt", b"plain text fixture"),
+            ("unknown.dat", b"\x00\x01\xff\x80arbitrary octets"),
+            (
+                "photo.jpg",
+                &[0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, b'J', b'F', b'I', b'F'],
+            ),
+            ("image.png", b"\x89PNG\r\n\x1a\n"),
+            ("image.gif", b"GIF89a"),
+            ("image.webp", b"RIFF\x00\x00\x00\x00WEBP"),
+            ("video.mp4", b"\x00\x00\x00\x18ftypmp42"),
+        ];
+        let (url, uploads) = upload_server().await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+
+        for (filename, bytes) in fixtures.iter().copied() {
+            let path = directory.path().join(filename);
+            std::fs::write(&path, bytes).unwrap();
+            let expected_mime = detect_upload_mime(bytes);
+            let descriptor = client.upload_file(path.to_str().unwrap()).await.unwrap();
+            assert_eq!(descriptor.mime_type, expected_mime, "{filename}");
+        }
+
+        let captured = uploads.lock().unwrap();
+        assert_eq!(captured.len(), fixtures.len());
+        for (captured, (filename, bytes)) in captured.iter().zip(fixtures.iter().copied()) {
+            assert_eq!(
+                captured.content_type,
+                detect_upload_mime(bytes),
+                "{filename}"
+            );
+            assert_eq!(captured.body.as_slice(), bytes, "{filename}");
+            assert!(captured.authenticated, "{filename} must retain upload auth");
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_and_oversized_files_are_rejected_before_upload() {
+        let (url, uploads) = upload_server().await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+
+        let missing = directory.path().join("missing.html");
+        assert!(client.upload_file(missing.to_str().unwrap()).await.is_err());
+
+        let oversized = directory.path().join("oversized.dat");
+        let mut file = std::fs::File::create(&oversized).unwrap();
+        file.write_all(b"opaque").unwrap();
+        file.set_len(super::MAX_NON_VIDEO_BYTES + 1).unwrap();
+        let error = client
+            .upload_file(oversized.to_str().unwrap())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            CliError::Usage(message) if message.contains("file too large")
+        ));
+        assert!(uploads.lock().unwrap().is_empty());
     }
 }
