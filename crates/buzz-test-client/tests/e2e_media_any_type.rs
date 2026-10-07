@@ -43,10 +43,20 @@ fn auth_header(event: &nostr::Event) -> String {
 }
 
 async fn upload(client: &Client, keys: &Keys, body: &[u8], declared_mime: &str) -> Response {
+    upload_route(client, keys, body, declared_mime, "/upload").await
+}
+
+async fn upload_route(
+    client: &Client,
+    keys: &Keys,
+    body: &[u8],
+    declared_mime: &str,
+    route: &str,
+) -> Response {
     let sha256 = hex::encode(Sha256::digest(body));
     let auth = sign_upload(keys, &sha256);
     client
-        .put(format!("{}/upload", relay_http_url()))
+        .put(format!("{}{route}", relay_http_url()))
         .header("Authorization", auth_header(&auth))
         .header("Content-Type", declared_mime)
         .header("X-SHA-256", sha256)
@@ -67,6 +77,56 @@ fn assert_inert_download(response: &Response) {
         response.headers()["content-security-policy"],
         "default-src 'none'"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires isolated relay + Postgres + Redis + S3-compatible storage"]
+async fn legacy_upload_uses_the_same_opaque_policy_auth_and_size_caps() {
+    let client = http_client();
+    let keys = Keys::generate();
+    let fixtures: &[(&str, &[u8])] = &[
+        ("text/html", b"<!doctype html>neutral legacy upload fixture"),
+        ("video/webm", b"\x1a\x45\xdf\xa3neutral webm fixture"),
+        (
+            "video/quicktime",
+            b"\x00\x00\x00\x18ftypqt  neutral quicktime fixture",
+        ),
+        (
+            "application/x-executable",
+            b"\x7fELF\x02\x01\x01neutral legacy fixture",
+        ),
+    ];
+    for (mime, bytes) in fixtures {
+        let response = upload_route(&client, &keys, bytes, mime, "/media/upload").await;
+        assert_eq!(response.status(), StatusCode::OK, "legacy {mime}");
+        let descriptor: serde_json::Value = response.json().await.expect("legacy descriptor");
+        assert_eq!(descriptor["type"], "application/octet-stream");
+        let get = client
+            .get(descriptor["url"].as_str().unwrap())
+            .send()
+            .await
+            .expect("legacy download");
+        assert_eq!(get.status(), StatusCode::OK);
+        assert_inert_download(&get);
+        assert_eq!(get.bytes().await.unwrap().as_ref(), *bytes);
+    }
+    let unauthenticated = client
+        .put(format!("{}/media/upload", relay_http_url()))
+        .body(b"neutral legacy unauthenticated".to_vec())
+        .send()
+        .await
+        .expect("legacy unauthenticated upload");
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+    let oversized = vec![b'x'; 65_537];
+    let response = upload_route(
+        &client,
+        &keys,
+        &oversized,
+        "application/octet-stream",
+        "/media/upload",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 #[tokio::test]

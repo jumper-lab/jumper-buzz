@@ -2,7 +2,7 @@
 //!
 //! Routes:
 //!   PUT  /upload                — BUD-02 exact-byte upload (auth required)
-//!   PUT  /media/upload          — temporary media-only legacy alias
+//!   PUT  /media/upload          — legacy alias (same opt-in file policy)
 //!   GET  /media/{sha256_ext}    — BUD-01 serve blob
 //!   HEAD /media/{sha256_ext}    — BUD-01 existence check
 
@@ -287,7 +287,7 @@ async fn upload_attribution(
     })
 }
 
-/// PUT `/upload` or the temporary media-only `/media/upload` alias.
+/// PUT `/upload` or the legacy `/media/upload` alias.
 ///
 /// Auth is validated via the [`AuthenticatedUpload`] extractor BEFORE the body
 /// is read, preventing unauthenticated clients from forcing body buffering.
@@ -386,7 +386,9 @@ pub async fn upload_blob(
                 attribution,
             )
             .await?
-        } else if auth.route_mode == UploadRouteMode::LegacyMedia {
+        } else if auth.route_mode == UploadRouteMode::LegacyMedia
+            && !state.config.media_allow_all_file_types
+        {
             let mime = infer::get(&bytes)
                 .map(|kind| kind.mime_type().to_string())
                 .unwrap_or_else(|| "application/octet-stream".to_string());

@@ -130,15 +130,15 @@ jobs:
                 cat /tmp/buzz-relay-ci.log
                 exit 1
               fi
-              cargo test --locked -p buzz-media --lib
-              cargo test --locked -p buzz-relay --lib media_get_auth_flag_on_rejects_unauthenticated_get_and_head_before_sidecar_gate
-              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked -p buzz-test-client --test e2e_media_any_type -- --ignored --nocapture
-              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked -p buzz-test-client --test e2e_media test_upload_and_get -- --ignored --nocapture
-              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked -p buzz-test-client --test e2e_media_extended test_upload_png_roundtrip -- --ignored --nocapture
-              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked -p buzz-test-client --test e2e_media_extended test_upload_gif_roundtrip -- --ignored --nocapture
-              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked -p buzz-test-client --test e2e_media_extended test_upload_webp_roundtrip -- --ignored --nocapture
-              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked -p buzz-test-client --test e2e_media_video test_video_upload_and_get -- --ignored --nocapture
-              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked -p buzz-test-client --test e2e_media_video test_video_range_request_206 -- --ignored --nocapture
+              cargo test --locked --release -p buzz-media --lib
+              cargo test --locked --release -p buzz-relay --lib media_get_auth_flag_on_rejects_unauthenticated_get_and_head_before_sidecar_gate
+              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked --release -p buzz-test-client --test e2e_media_any_type -- --ignored --nocapture
+              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked --release -p buzz-test-client --test e2e_media test_upload_and_get -- --ignored --nocapture
+              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked --release -p buzz-test-client --test e2e_media_extended test_upload_png_roundtrip -- --ignored --nocapture
+              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked --release -p buzz-test-client --test e2e_media_extended test_upload_gif_roundtrip -- --ignored --nocapture
+              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked --release -p buzz-test-client --test e2e_media_extended test_upload_webp_roundtrip -- --ignored --nocapture
+              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked --release -p buzz-test-client --test e2e_media_video test_video_upload_and_get -- --ignored --nocapture
+              RELAY_HTTP_URL=http://localhost:3000 cargo test --locked --release -p buzz-test-client --test e2e_media_video test_video_range_request_206 -- --ignored --nocapture
             '
 
       - name: Build Docker image as a binary-only overlay on the exact live image
