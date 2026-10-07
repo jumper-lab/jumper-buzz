@@ -1,0 +1,51 @@
+name: Frozen relay production dependency audit
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/relay-production-audit.yml'
+permissions:
+  contents: read
+jobs:
+  production-graph:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 70aae24617d9cc8574b064808685bd6c9bcb0f6f
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616
+      - name: Verify the frozen production source and graph without development edges
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p production-evidence
+          test "$(git rev-parse HEAD)" = '70aae24617d9cc8574b064808685bd6c9bcb0f6f'
+          git rev-parse HEAD > production-evidence/SOURCE_COMMIT
+          sha256sum Cargo.lock > production-evidence/LOCK_SHA256
+          cargo tree --locked -p buzz-relay --target x86_64-unknown-linux-gnu --edges normal,build,features > production-evidence/production-tree.txt
+          cargo tree --locked -p buzz-relay --target x86_64-unknown-linux-gnu --edges all -i nostr-relay-pool > production-evidence/development-route.txt
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          tree = Path('production-evidence/production-tree.txt').read_text()
+          for package, version in [('rustls', '0.23.45'), ('h2', '0.4.16'), ('nostr', '0.44.7')]:
+              assert re.search(r'(?<![\w-])' + re.escape(package) + ' v' + re.escape(version) + r'(?![\d.])', tree), package
+          for package in ['nostr-relay-pool', 'webbrowser']:
+              assert not re.search(r'(?<![\w-])' + re.escape(package) + r' v', tree), package + ' remains in production graph'
+          Path('production-evidence/classification.txt').write_text('Production graph excludes development dependencies explicitly. nostr-relay-pool and webbrowser are absent. Their workspace findings are not attributed to the deployed relay. Existing advisory policy is unchanged.\n')
+          PY
+      - name: Enforce the production-only scan without adding ignores
+        shell: bash
+        run: |
+          set +e
+          cargo deny --locked --manifest-path crates/buzz-relay/Cargo.toml --exclude-dev --target x86_64-unknown-linux-gnu --color never check > production-evidence/production-scan.txt 2>&1
+          result=$?
+          printf '%s\n' "$result" > production-evidence/SCAN_EXIT
+          test "$result" -eq 0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: frozen-relay-production-audit-70aae246
+          path: production-evidence/
+          if-no-files-found: error
+          retention-days: 14
