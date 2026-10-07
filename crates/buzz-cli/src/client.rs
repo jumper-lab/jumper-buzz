@@ -211,6 +211,16 @@ fn detect_upload_mime(bytes: &[u8]) -> String {
         .unwrap_or_else(|| "application/octet-stream".to_string())
 }
 
+// Only MP4 enters the relay's validated video pipeline. Other video formats
+// are opaque files and must use the ordinary file preflight budget.
+fn upload_size_limit(mime: &str) -> u64 {
+    if mime == "video/mp4" {
+        MAX_VIDEO_BYTES
+    } else {
+        MAX_NON_VIDEO_BYTES
+    }
+}
+
 /// Returns `true` for moderation command kinds (9040–9044).
 ///
 /// These events execute immediately at the relay without dedup, so they must
@@ -1140,11 +1150,7 @@ impl BuzzClient {
         let mime = detect_upload_mime(&bytes);
 
         // 3. Size check
-        let max = if mime.starts_with("video/") {
-            MAX_VIDEO_BYTES
-        } else {
-            MAX_NON_VIDEO_BYTES
-        };
+        let max = upload_size_limit(&mime);
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
                 "file too large: {} bytes (max {})",
@@ -1158,7 +1164,7 @@ impl BuzzClient {
 
         // 5. PUT request to the BUD-02 /upload endpoint with a generous timeout.
         // Auth is signed per attempt — matches the per-attempt signing pattern in download_media.
-        let upload_timeout = if mime.starts_with("video/") {
+        let upload_timeout = if mime == "video/mp4" {
             Duration::from_secs(600)
         } else {
             Duration::from_secs(120)
@@ -2328,6 +2334,23 @@ mod retry_policy_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn upload_limits_reserve_larger_budget_for_validated_mp4_only() {
+        assert_eq!(
+            super::upload_size_limit("video/mp4"),
+            super::MAX_VIDEO_BYTES
+        );
+        for mime in [
+            "video/webm",
+            "video/quicktime",
+            "video/x-matroska",
+            "audio/mpeg",
+            "application/octet-stream",
+        ] {
+            assert_eq!(super::upload_size_limit(mime), super::MAX_NON_VIDEO_BYTES);
+        }
+    }
+
     #[test]
     fn upload_mime_detection_keeps_existing_media_and_defaults_unknown_bytes() {
         let fixtures: &[(&[u8], &str)] = &[
