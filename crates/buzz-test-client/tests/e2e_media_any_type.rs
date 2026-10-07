@@ -71,6 +71,34 @@ fn assert_inert_download(response: &Response) {
 
 #[tokio::test]
 #[ignore = "requires isolated relay + Postgres + Redis + S3-compatible storage"]
+async fn canonical_png_keeps_the_sanitized_image_pipeline() {
+    let client = http_client();
+    let keys = Keys::generate();
+    let png = include_bytes!("../../buzz-media/tests/fixtures/ios/uikit-sanitized.png");
+
+    // Deliberately mismatch the declaration: sniffed bytes must keep the PNG on
+    // the canonical validator/thumbnail pipeline, not generic attachment mode.
+    let uploaded = upload(&client, &keys, png, "text/plain").await;
+    assert_eq!(uploaded.status(), StatusCode::OK, "canonical PNG upload");
+    let descriptor: serde_json::Value = uploaded.json().await.expect("PNG descriptor");
+    assert_eq!(descriptor["type"], "image/png");
+    let url = descriptor["url"].as_str().expect("PNG URL");
+    assert!(url.ends_with(".png"));
+
+    let get = client.get(url).send().await.expect("PNG download");
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(get.headers()["content-type"], "image/png");
+    assert_eq!(get.headers()["content-disposition"], "inline");
+    assert_eq!(get.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(
+        get.headers()["content-security-policy"],
+        "default-src 'none'"
+    );
+    assert_eq!(get.bytes().await.unwrap().as_ref(), png.as_slice());
+}
+
+#[tokio::test]
+#[ignore = "requires isolated relay + Postgres + Redis + S3-compatible storage"]
 async fn arbitrary_formats_are_authenticated_opaque_downloads_with_safe_ranges() {
     let client = http_client();
     let keys = Keys::generate();

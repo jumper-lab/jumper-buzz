@@ -13,8 +13,8 @@ use crate::thumbnail::generate_image_metadata_sync;
 use crate::types::BlobDescriptor;
 use crate::upload_record::{record_upload_event, UploadAttribution, UploadEventFacts};
 use crate::validation::{
-    looks_like_mp4_iso_bmff, mime_to_ext, validate_content, validate_file_content,
-    validate_file_content_with_policy, validate_video_file,
+    looks_like_mp4_iso_bmff, mime_to_ext, validate_content, validate_file_content_with_policy,
+    validate_video_file,
 };
 
 /// Shared buffered-upload pipeline for the image and generic-file paths.
