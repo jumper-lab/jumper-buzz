@@ -174,7 +174,7 @@ jobs:
 
       - name: Smoke-start the deployable overlay image
         env:
-          RELAY_IMAGE: buzz-relay-live-overlay-${{ steps.overlay.outputs.source_commit }}
+          RELAY_IMAGE: buzz-relay-live-overlay:${{ steps.overlay.outputs.source_commit }}
         run: |
           set -euo pipefail
           name=buzz-relay-overlay-smoke
